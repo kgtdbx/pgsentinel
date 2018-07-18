@@ -63,8 +63,9 @@ static int ash_sampling_period = 1;
 static int ash_max_entries = 1000;
 char *pgsentinelDbName = "postgres";
 
-static uint32 ash_hash_string(const char *str, int len);
-
+/* to create queryid in case of utility statements*/
+static uint32 ash_hash32_string(const char *str, int len);
+static uint64 ash_hash64_string(const char *str, int len);
 
 /* Worker name */
 static char *worker_name = "pgsentinel";
@@ -148,6 +149,7 @@ static void ash_prepare_store(TimestampTz ash_time,const int pid, const char* us
 /* get max procs */
 static int get_max_procs_count(void);
 
+/* The procEntry */
 static procEntry
 search_procentry(int pid)
 {
@@ -166,12 +168,19 @@ search_procentry(int pid)
                                         errmsg("backend with pid=%d not found", pid)));
 }
 
+/* to create queryid in case of utility statements*/
 static uint32
-ash_hash_string(const char *str, int len)
+ash_hash32_string(const char *str, int len)
 {
         return hash_any((const unsigned char *) str, len);
 }
 
+static uint64
+ash_hash64_string(const char *str, int len)
+{
+        return DatumGetUInt64(hash_any_extended((const unsigned char *) str,
+                                                                                        len, 0));
+}
 
 /*
  * Calculate max processes count.
@@ -191,6 +200,7 @@ get_max_procs_count(void)
         return count;
 }
 
+/* save queryid and query text */
 static void
 ash_post_parse_analyze(ParseState *pstate, Query *query)
 {
@@ -238,10 +248,14 @@ ash_post_parse_analyze(ParseState *pstate, Query *query)
         /*
          * For utility statements, we just hash the query string to get an ID.
          */
+#if PG_VERSION_NUM >= 110000
+	if (query->queryId == UINT64CONST(0)) {
+                ProcEntryArray[i].queryid = ash_hash64_string(querytext, query_len);
+#else
         if (query->queryId == 0) {
-                ProcEntryArray[i].queryid = ash_hash_string(querytext, query_len);
+                ProcEntryArray[i].queryid = ash_hash32_string(querytext, query_len);
+#endif
         } else {
-
         ProcEntryArray[i].queryid = query->queryId;
         }
         }
@@ -905,7 +919,6 @@ _PG_init(void)
         shmem_startup_hook = ash_shmem_startup;
         prev_post_parse_analyze_hook = post_parse_analyze_hook;
         post_parse_analyze_hook = ash_post_parse_analyze;
-
 
 	/* Worker parameter and registration */
         memset(&worker, 0, sizeof(worker));
